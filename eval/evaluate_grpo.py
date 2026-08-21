@@ -238,6 +238,7 @@ def main() -> None:
 
     from unsloth import FastLanguageModel
     from vllm import SamplingParams
+    from vllm.lora.request import LoRARequest
 
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name="unsloth/Qwen3-4B-unsloth-bnb-4bit",
@@ -248,7 +249,9 @@ def main() -> None:
     )
     FastLanguageModel.for_inference(model)
     sampling_params = SamplingParams(temperature=0.7, top_p=0.9, max_tokens=256)
-    lora_request = model.load_lora(args.lora_path) if args.lora_path else None
+    # model.load_lora() isn't reliably available on a pure-inference load -
+    # see the identical fix in env/policies.py's UnslothPolicy for why.
+    lora_request = LoRARequest("trained_adapter", 1, args.lora_path) if args.lora_path else None
 
     tiers = [args.difficulty] if args.difficulty else list(DIFFICULTIES)
     

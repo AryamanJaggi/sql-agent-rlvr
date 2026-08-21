@@ -1,8 +1,17 @@
 """GRPO training via TRL's environment_factory.
 
-training drives rollouts through native tool-calling instead of ReAct-text 
-agent_loop.py Tools and reward underneath are identical to the other two conditions 
-(same env.tools functions, same env.verifier scoring). Only the calling protocol differs.
+Training drives rollouts through native tool-calling instead of ReAct-text
+agent_loop.py. Tools and reward underneath are identical to the other two
+conditions (same env.tools functions, same env.verifier scoring). Only the
+calling protocol differs.
+
+environment_factory needs TRL>=1.0, which Unsloth doesn't support (every
+release, including live main, caps trl<=0.24.0 - confirmed against both
+PyPI and Unsloth's own pyproject.toml). So unlike train_sft.py, this script
+does NOT use Unsloth: plain transformers/peft/bitsandbytes QLoRA + a real
+trl>=1.0 instead, same base model repo either way. Run this in its own
+Colab runtime, separate from every other Unsloth-based cell in this repo's
+notebook (trl==0.24.0 and trl>=1.0 can't both be installed at once).
 
 Run as a module so from data.../from env... resolve:
     python -m train.train_grpo --limit 150 --output-dir grpo_adapter
@@ -16,13 +25,24 @@ from data.spider_loader import Difficulty, SpiderExample, load_spider
 from env.grpo_env import SqlAgentGrpoEnv, grpo_reward_func
 from env.policies import GRPO_SYSTEM_PROMPT
 
+MODEL_NAME = "unsloth/Qwen3-4B-unsloth-bnb-4bit"
+LORA_TARGET_MODULES = [
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj",
+]
+
 SPLIT = "train"
 DIFFICULTY_TIERS: tuple[Difficulty, ...] = ("hard", "extra")
 
 
 def build_grpo_dataset(examples: list[SpiderExample], system_prompt: str):
     """Pure function, only needs `datasets` (already a local dependency),
-    no unsloth/trl. db_path/gold_sql/db_id ride along as extra dataset
+    no peft/trl. db_path/gold_sql/db_id ride along as extra dataset
     columns because TRL's environment_factory passes every dataset
     column into reset(**kwargs) - how each rollout's SqlAgentGrpoEnv
     instance learns which Spider example it's supposed to be answering.
@@ -43,6 +63,38 @@ def build_grpo_dataset(examples: list[SpiderExample], system_prompt: str):
             "db_id": [ex.db_id for ex in examples],
         }
     )
+
+
+def training_hyperparams(args: argparse.Namespace) -> dict:
+    """Pure mapping from CLI args to the kwargs the Colab-only main()
+    hands to peft/TRL. No peft/trl import needed, so this is testable
+    locally without those packages installed.
+    """
+    run_name = f"grpo-lora{args.lora_rank}-G{args.num_generations}"
+    return {
+        "lora": {
+            "r": args.lora_rank,
+            "lora_alpha": args.lora_rank,
+            "target_modules": LORA_TARGET_MODULES,
+            "task_type": "CAUSAL_LM",
+        },
+        "grpo_config": {
+            "output_dir": args.output_dir,
+            "num_train_epochs": args.epochs,
+            "num_generations": args.num_generations,
+            "beta": args.kl_beta,
+            "learning_rate": args.learning_rate,
+            "max_completion_length": args.max_completion_length,
+            "seed": args.seed,
+            "use_vllm": True,
+            "vllm_mode": "colocate",
+            "chat_template_kwargs": {"enable_thinking": False},
+            "gradient_checkpointing": True,
+            "report_to": "wandb",
+            "run_name": run_name,
+            "log_completions": True,
+        },
+    }
 
 
 def _wandb_login() -> None:
@@ -79,51 +131,34 @@ def main() -> None:
     print(f"Loaded {len(examples)} training examples across {DIFFICULTY_TIERS}")
 
     dataset = build_grpo_dataset(examples, GRPO_SYSTEM_PROMPT)
+    hp = training_hyperparams(args)
 
-    from unsloth import FastLanguageModel
+    import torch
+    from peft import LoraConfig, get_peft_model
+    from transformers import AutoModelForCausalLM, AutoTokenizer, set_seed
     from trl import GRPOConfig, GRPOTrainer
 
     _wandb_login()
     import wandb
-    run_name = f"grpo-lora{args.lora_rank}-G{args.num_generations}"
-    wandb.init(project=args.wandb_project, name=run_name)
+    wandb.init(project=args.wandb_project, name=hp["grpo_config"]["run_name"])
 
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name="unsloth/Qwen3-4B-unsloth-bnb-4bit",
-        max_seq_length=args.max_completion_length + 1024,
-        load_in_4bit=True,
-        fast_inference=True,
-    )
-    model = FastLanguageModel.get_peft_model(
-        model,
-        r=args.lora_rank,
-        lora_alpha=args.lora_rank,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-        use_gradient_checkpointing="unsloth",
-        random_state=args.seed,
-    )
+    # Seeds LoRA's own random init - get_peft_model() below has no seed
+    # param of its own (Unsloth's from_pretrained/get_peft_model path
+    # elsewhere in this repo takes care of this itself; here we're not
+    # going through Unsloth, so it's on us).
+    set_seed(args.seed)
 
-    grpo_config = GRPOConfig(
-        output_dir=args.output_dir,
-        num_train_epochs=args.epochs,
-        num_generations=args.num_generations,
-        beta=args.kl_beta,
-        learning_rate=args.learning_rate,
-        max_completion_length=args.max_completion_length,
-        seed=args.seed,
-        use_vllm=True,
-        vllm_mode="colocate",
-        chat_template_kwargs={"enable_thinking": False},
-        report_to="wandb",
-        run_name=run_name,
-        log_completions=True,
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    model = AutoModelForCausalLM.from_pretrained(
+        MODEL_NAME, dtype=torch.bfloat16, device_map="auto"
     )
+    model = get_peft_model(model, LoraConfig(**hp["lora"]))
 
     trainer = GRPOTrainer(
         model=model,
         reward_funcs=grpo_reward_func,
         train_dataset=dataset,
-        args=grpo_config,
+        args=GRPOConfig(**hp["grpo_config"]),
         environment_factory=SqlAgentGrpoEnv,
     )
     trainer.train()
