@@ -84,6 +84,9 @@ def main() -> None:
     from trl import GRPOConfig, GRPOTrainer
 
     _wandb_login()
+    import wandb
+    run_name = f"grpo-lora{args.lora_rank}-G{args.num_generations}"
+    wandb.init(project=args.wandb_project, name=run_name)
 
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name="unsloth/Qwen3-4B-unsloth-bnb-4bit",
@@ -112,7 +115,7 @@ def main() -> None:
         vllm_mode="colocate",
         chat_template_kwargs={"enable_thinking": False},
         report_to="wandb",
-        run_name=f"grpo-lora{args.lora_rank}-G{args.num_generations}",
+        run_name=run_name,
         log_completions=True,
     )
 

@@ -136,6 +136,8 @@ def main() -> None:
     from unsloth import FastLanguageModel
 
     _wandb_login()
+    import wandb
+    wandb.init(project=args.wandb_project, name=hp["sft_config"]["run_name"])
 
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name="unsloth/Qwen3-4B-unsloth-bnb-4bit",
