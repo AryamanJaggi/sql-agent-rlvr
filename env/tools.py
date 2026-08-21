@@ -17,6 +17,28 @@ import sqlparse
 
 ResultSet = list[tuple]
 
+# An un-limited query against a large table can return a result set whose
+# str() is megabytes long. Feeding that back into the transcript blows past
+# the model's context window and crashes generation (ran into this during 
+# data collection. unbounded SELECT produced a 5MB+ prompt against an 8192-token 
+# model). Cap what the agent sees here. The
+# untouched result set is still what scoring uses (env.environment keeps
+# the raw rows separately for that), so truncation only affects what's fed
+# back into the prompt instead of the reward
+MAX_OBSERVATION_CHARS = 4000
+
+
+def format_result(result: Union[ResultSet, str]) -> str:
+    """Render a run_sql result (or its error string) as prompt-safe text."""
+    text = str(result)
+    if len(text) <= MAX_OBSERVATION_CHARS:
+        return text
+    row_note = f" of {len(result)} rows" if not isinstance(result, str) else ""
+    return (
+        text[:MAX_OBSERVATION_CHARS]
+        + f"\n... (truncated{row_note} - narrow your query, e.g. add LIMIT)"
+    )
+
 
 def inspect_schema(conn: sqlite3.Connection) -> str:
     """Return a human-readable summary of every table and its columns."""

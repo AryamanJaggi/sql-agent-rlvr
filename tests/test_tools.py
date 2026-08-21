@@ -2,7 +2,7 @@ import sqlite3
 
 import pytest
 
-from env.tools import final_answer, inspect_schema, run_sql
+from env.tools import MAX_OBSERVATION_CHARS, final_answer, format_result, inspect_schema, run_sql
 
 
 @pytest.fixture
@@ -89,3 +89,31 @@ def test_run_sql_recovers_after_timeout(conn):
 def test_final_answer_passes_value_through():
     assert final_answer(42) == 42
     assert final_answer("Alice") == "Alice"
+
+
+def test_format_result_passes_small_results_through():
+    small = [(1, "Alice"), (2, "Bob")]
+    assert format_result(small) == str(small)
+
+
+def test_format_result_truncates_large_result_sets():
+    # An un-LIMITed query against a big table returns exactly this shape:
+    # a long list of tuples whose str() can run into the megabytes and
+    # crash generation once it's fed back into the prompt (this is what
+    # actually happened during real data collection - a 5MB+ observation
+    # against an 8192-token model). format_result must cap it.
+    huge = [(i, "x" * 100) for i in range(10_000)]
+    observation = format_result(huge)
+
+    assert len(observation) <= MAX_OBSERVATION_CHARS + 100
+    assert "truncated" in observation
+    assert "10000 rows" in observation
+
+
+def test_format_result_truncates_large_error_strings_without_row_count():
+    huge_error = "Error: " + "x" * 10_000
+    observation = format_result(huge_error)
+
+    assert len(observation) <= MAX_OBSERVATION_CHARS + 100
+    assert "truncated" in observation
+    assert "rows" not in observation

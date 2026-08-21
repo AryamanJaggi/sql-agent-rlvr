@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import sqlite3
 
+from env.tools import format_result as _format_result
 from env.tools import inspect_schema as _inspect_schema
 from env.tools import run_sql as _run_sql
 from env.verifier import verify_episode
@@ -83,8 +84,8 @@ class SqlAgentGrpoEnv:
         if not isinstance(result, str):
             # Cache the last successful result to score against (final_answer is unconstrained text)
             self.last_result = result
-            
-        return str(result)
+
+        return _format_result(result)
 
     def final_answer(self, value: str) -> str:
         """

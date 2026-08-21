@@ -166,6 +166,36 @@ def test_step_cap_exhaustion_without_final_answer(db_path):
     assert "Step limit reached" in result.transcript
 
 
+def test_large_result_set_does_not_blow_up_the_transcript(db_path):
+    # Reproduces a real crash from data collection: an un-LIMITed query
+    # against a big table returned a result set whose str() was 5MB+,
+    # which blew past the model's context window on the next generation
+    # call. inspect_schema's result stays untruncated (small by
+    # construction); only run_sql's observation needs capping.
+    conn = sqlite3.connect(str(db_path))
+    conn.executemany(
+        "INSERT INTO singer VALUES (?, ?, ?)",
+        [(i, f"padding_{i}" * 20, 40) for i in range(4, 5000)],
+    )
+    conn.commit()
+    conn.close()
+
+    policy = ScriptedPolicy(
+        [
+            "Action: run_sql\nAction Input: SELECT * FROM singer",
+            f"Action: run_sql\nAction Input: {GOLD_SQL}",
+            "Action: final_answer\nAction Input: Alice, Carol",
+        ]
+    )
+    result = run_episode(policy=policy, **_episode_kwargs(db_path))
+
+    # Scoring still uses the real (untruncated) result of the last
+    # successful query, so correctness isn't affected by truncation.
+    assert result.success is True
+    assert len(result.transcript) < 20_000
+    assert "truncated" in result.transcript
+
+
 # ---- defense-in-depth: the connection agent_loop opens is truly read-only
 
 

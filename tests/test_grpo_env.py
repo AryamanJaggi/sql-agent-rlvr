@@ -96,6 +96,29 @@ def test_reset_reusable_for_a_new_episode(env, db_path):
     assert env.reward == 0.0
 
 
+def test_run_sql_large_result_truncated_but_reward_uses_full_result(env, db_path):
+    # Same crash class as agent_loop's ReAct path: an un-LIMITed query can
+    # return a result whose str() is huge enough to blow the model's
+    # context window on native tool-calling's next turn too. run_sql's
+    # returned text must be capped even though scoring (grpo_reward_func)
+    # still needs the untouched result set.
+    conn = sqlite3.connect(str(db_path))
+    conn.executemany(
+        "INSERT INTO singer VALUES (?, ?, ?)",
+        [(i, f"padding_{i}" * 20, 40) for i in range(4, 5000)],
+    )
+    conn.commit()
+    conn.close()
+
+    observation = env.run_sql("SELECT * FROM singer")
+    assert len(observation) < 5000
+    assert "truncated" in observation
+
+    env.run_sql(GOLD_SQL)
+    env.final_answer("Alice, Carol")
+    assert env.reward == 1.0
+
+
 def test_grpo_reward_func_reads_reward_off_each_environment(env, db_path):
     env.run_sql(GOLD_SQL)
     env.final_answer("Alice, Carol")

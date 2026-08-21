@@ -10,7 +10,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass, field
 
-from env.tools import ResultSet, final_answer, inspect_schema, run_sql
+from env.tools import ResultSet, final_answer, format_result, inspect_schema, run_sql
 
 ACTION_FORMAT_HELP = (
     "Respond with exactly one action per turn, in this format:\n"
@@ -84,7 +84,7 @@ class Environment:
                 # we score off the agent's last successful run_sql result,
                 # not whatever text it types into final_answer
                 self.last_result = result
-            observation = str(result)
+            observation = format_result(result)
         elif tool_call.tool == "final_answer":
             self.final_value = final_answer(tool_call.input)
             self.done = True
