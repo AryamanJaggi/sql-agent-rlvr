@@ -13,12 +13,14 @@ so this doesn't re-download 200 sqlite files on every run.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 
 from datasets import load_dataset
 from huggingface_hub import hf_hub_download
+from huggingface_hub.errors import HfHubHTTPError, LocalEntryNotFoundError
 
 QA_REPO = "xlangai/spider"
 DB_REPO = "target-benchmark/spider-corpus"
@@ -81,15 +83,41 @@ def _db_dir_for_split(split: str) -> str:
     return _SPLIT_TO_DB_DIR[split]
 
 
-def _download_db(split: str, db_id: str) -> Path:
+_TRANSIENT_HF_ERRORS = (HfHubHTTPError, LocalEntryNotFoundError)
+
+
+def _download_db(
+    split: str,
+    db_id: str,
+    max_retries: int = 5,
+    retry_delay_s: float = 2.0,
+    sleep: Callable[[float], None] = time.sleep,
+) -> Path:
+    """Download one Spider .sqlite file, retrying transient Hub failures.
+
+    HF Hub rate-limits (429) a burst of many small-file downloads - hit
+    for real after ~28 successful downloads in a row during data
+    collection. hf_hub_download surfaces that as LocalEntryNotFoundError
+    when there's no cached copy to fall back to yet, so both that and
+    the underlying HTTP error are retried with exponential backoff
+    rather than killing the whole run over one rate-limit window.
+    """
     db_dir = _db_dir_for_split(split)
-    local_path = hf_hub_download(
-        repo_id=DB_REPO,
-        repo_type="dataset",
-        filename=f"{db_dir}/{db_id}/{db_id}.sqlite",
-        cache_dir=str(CACHE_DIR),
-    )
-    return Path(local_path)
+    filename = f"{db_dir}/{db_id}/{db_id}.sqlite"
+
+    for attempt in range(max_retries):
+        try:
+            local_path = hf_hub_download(
+                repo_id=DB_REPO,
+                repo_type="dataset",
+                filename=filename,
+                cache_dir=str(CACHE_DIR),
+            )
+            return Path(local_path)
+        except _TRANSIENT_HF_ERRORS:
+            if attempt == max_retries - 1:
+                raise
+            sleep(retry_delay_s * (2**attempt))
 
 
 def load_spider(
