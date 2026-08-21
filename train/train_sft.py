@@ -132,8 +132,8 @@ def main() -> None:
     hp = training_hyperparams(args)
 
     from datasets import Dataset
-    from trl import SFTConfig, SFTTrainer
     from unsloth import FastLanguageModel
+    from trl import SFTConfig, SFTTrainer
 
     _wandb_login()
     import wandb
