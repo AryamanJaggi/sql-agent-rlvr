@@ -49,6 +49,22 @@ class SqlAgentGrpoEnv:
         self.steps_taken = 0
         return None
 
+    def __del__(self):
+        """TRL builds a fresh environment per rollout and never explicitly
+        closes it, so without this every rollout leaves an open SQLite
+        handle behind until GC happens to get to it - thousands of them
+        over a full training run. The leading underscore also keeps this
+        out of TRL's public-method tool auto-discovery.
+        """
+        conn = getattr(self, "conn", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                # Interpreter shutdown can pull sqlite3 out from under us;
+                # a failed close here is never worth raising from __del__.
+                pass
+
     def _guard_step_budget(self) -> None:
         if self.done:
             raise ValueError("Episode already finished.")

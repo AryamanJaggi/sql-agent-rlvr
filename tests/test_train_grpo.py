@@ -1,7 +1,10 @@
 import argparse
 from pathlib import Path
 
+import pytest
+
 from data.spider_loader import SpiderExample
+from env.grpo_env import MAX_STEPS
 from train.train_grpo import LORA_TARGET_MODULES, build_grpo_dataset, training_hyperparams
 
 
@@ -10,11 +13,14 @@ def _args(**overrides) -> argparse.Namespace:
         output_dir="grpo_adapter",
         lora_rank=32,
         num_generations=8,
+        batch_size=4,
+        grad_accum=4,
         kl_beta=0.04,
         learning_rate=1e-6,
-        max_completion_length=4096,
+        max_completion_length=8192,
         epochs=1.0,
         seed=3407,
+        use_vllm=False,
     )
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -85,10 +91,57 @@ def test_run_name_encodes_rank_and_group_size():
     assert hp["grpo_config"]["run_name"] == "grpo-lora64-G16"
 
 
-def test_uses_vllm_colocate_mode():
+def test_vllm_off_by_default():
+    # TRL's vLLM weight sync merges the LoRA and pushes raw tensors with no
+    # dequantization, which shape-mismatches against a bitsandbytes-quantized
+    # vLLM engine (huggingface/trl#3654, open). Must stay opt-in.
     hp = training_hyperparams(_args())
+    assert hp["grpo_config"]["use_vllm"] is False
+
+
+def test_vllm_can_be_opted_into():
+    hp = training_hyperparams(_args(use_vllm=True))
     assert hp["grpo_config"]["use_vllm"] is True
     assert hp["grpo_config"]["vllm_mode"] == "colocate"
+
+
+def test_batch_and_grad_accum_come_from_cli():
+    hp = training_hyperparams(_args(batch_size=2, grad_accum=8))
+    assert hp["grpo_config"]["per_device_train_batch_size"] == 2
+    assert hp["grpo_config"]["gradient_accumulation_steps"] == 8
+
+
+def test_rejects_batch_not_divisible_by_group_size():
+    # 4 x 4 = 16 completions per generation batch, which can't split into
+    # whole groups of 5.
+    with pytest.raises(ValueError, match="divisible by --num-generations"):
+        training_hyperparams(_args(batch_size=4, grad_accum=4, num_generations=5))
+
+
+def test_accepts_batch_divisible_by_group_size():
+    hp = training_hyperparams(_args(batch_size=4, grad_accum=4, num_generations=2))
+    assert hp["grpo_config"]["num_generations"] == 2
+
+
+def test_truncated_completions_are_masked_out_of_loss():
+    # Multi-turn episodes that blow the token budget are context-budget
+    # artifacts, not policy failures - they must not train the model.
+    hp = training_hyperparams(_args())
+    assert hp["grpo_config"]["mask_truncated_completions"] is True
+
+
+def test_tool_call_iterations_bounded_by_env_step_budget():
+    # TRL feeds a tool exception back as an observation and continues the
+    # rollout, so SqlAgentGrpoEnv's own step guard can't end an episode by
+    # itself - this is what actually bounds the turn count.
+    hp = training_hyperparams(_args())
+    assert hp["grpo_config"]["max_tool_calling_iterations"] == MAX_STEPS
+
+
+def test_classic_grpo_loss_is_pinned():
+    # TRL >=1.0 defaults loss_type to "dapo"; this project is comparing GRPO.
+    hp = training_hyperparams(_args())
+    assert hp["grpo_config"]["loss_type"] == "grpo"
 
 
 def test_thinking_disabled_via_chat_template_kwargs():

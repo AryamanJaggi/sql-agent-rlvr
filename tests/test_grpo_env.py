@@ -119,6 +119,25 @@ def test_run_sql_large_result_truncated_but_reward_uses_full_result(env, db_path
     assert env.reward == 1.0
 
 
+def test_del_closes_the_sqlite_connection(db_path):
+    # TRL builds a fresh env per rollout and never closes it, so the
+    # connection has to get cleaned up on garbage collection or a full
+    # training run leaks thousands of open handles.
+    e = SqlAgentGrpoEnv()
+    e.reset(db_path=str(db_path), gold_sql=GOLD_SQL, db_id="concert_singer")
+    conn = e.conn
+
+    e.__del__()
+
+    with pytest.raises(sqlite3.ProgrammingError):
+        conn.execute("SELECT 1")
+
+
+def test_del_is_safe_when_no_connection_was_ever_opened():
+    # __del__ can fire on a half-constructed instance (reset never called).
+    SqlAgentGrpoEnv().__del__()
+
+
 def test_grpo_reward_func_reads_reward_off_each_environment(env, db_path):
     env.run_sql(GOLD_SQL)
     env.final_answer("Alice, Carol")

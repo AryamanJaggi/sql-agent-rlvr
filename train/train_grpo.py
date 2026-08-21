@@ -22,7 +22,7 @@ from __future__ import annotations
 import argparse
 
 from data.spider_loader import Difficulty, SpiderExample, load_spider
-from env.grpo_env import SqlAgentGrpoEnv, grpo_reward_func
+from env.grpo_env import MAX_STEPS, SqlAgentGrpoEnv, grpo_reward_func
 from env.policies import GRPO_SYSTEM_PROMPT
 
 MODEL_NAME = "unsloth/Qwen3-4B-unsloth-bnb-4bit"
@@ -69,7 +69,21 @@ def training_hyperparams(args: argparse.Namespace) -> dict:
     """Pure mapping from CLI args to the kwargs the Colab-only main()
     hands to peft/TRL. No peft/trl import needed, so this is testable
     locally without those packages installed.
+
+    Raises ValueError on a batch/group-size mismatch rather than letting
+    TRL fail deeper in, since this is the easiest thing to get wrong
+    when changing G for the ablation.
     """
+    effective_batch = args.batch_size * args.grad_accum
+    if effective_batch % args.num_generations != 0:
+        raise ValueError(
+            f"effective batch size (batch_size {args.batch_size} x grad_accum "
+            f"{args.grad_accum} = {effective_batch}) must be divisible by "
+            f"--num-generations ({args.num_generations}). GRPO samples a group of "
+            f"num_generations completions per prompt, so the batch has to split "
+            f"evenly into whole groups."
+        )
+
     run_name = f"grpo-lora{args.lora_rank}-G{args.num_generations}"
     return {
         "lora": {
@@ -81,18 +95,47 @@ def training_hyperparams(args: argparse.Namespace) -> dict:
         "grpo_config": {
             "output_dir": args.output_dir,
             "num_train_epochs": args.epochs,
+            "per_device_train_batch_size": args.batch_size,
+            "gradient_accumulation_steps": args.grad_accum,
             "num_generations": args.num_generations,
             "beta": args.kl_beta,
             "learning_rate": args.learning_rate,
-            "max_completion_length": args.max_completion_length,
             "seed": args.seed,
-            "use_vllm": True,
+            # Budget for the WHOLE multi-turn episode - every generation
+            # plus every tool result, not per turn. Schema dumps and query
+            # results (capped at env.tools.MAX_OBSERVATION_CHARS) eat into
+            # the same allowance, so this has to cover ~MAX_STEPS rounds of
+            # both. Too low and episodes get truncated before final_answer,
+            # scoring 0 for a context-budget reason rather than a reasoning
+            # one - which would look exactly like "GRPO isn't learning".
+            "max_completion_length": args.max_completion_length,
+            # Truncated episodes are context-budget artifacts, not real
+            # policy failures, so keep them out of the loss entirely.
+            "mask_truncated_completions": True,
+            # TRL feeds a tool's exception back to the model as an
+            # observation and CONTINUES the rollout, so our own
+            # _guard_step_budget raising past MAX_STEPS doesn't end an
+            # episode by itself - without this the model keeps calling
+            # tools into an already-finished env until it burns the whole
+            # token budget.
+            "max_tool_calling_iterations": MAX_STEPS,
+            # TRL >=1.0 defaults this to "dapo". Pin the classic GRPO loss
+            # so the run matches what this project claims to be comparing.
+            "loss_type": "grpo",
+            # Deliberately hotter than eval/evaluate_grpo.py's 0.7: RL needs
+            # exploration to get reward variance within a group, eval wants
+            # the policy's confident behaviour.
+            "temperature": 1.0,
+            "use_vllm": args.use_vllm,
             "vllm_mode": "colocate",
             "chat_template_kwargs": {"enable_thinking": False},
             "gradient_checkpointing": True,
             "report_to": "wandb",
             "run_name": run_name,
             "log_completions": True,
+            # Multi-turn transcripts are long; printing every completion
+            # buries the actual training logs.
+            "num_completions_to_print": 2,
         },
     }
 
@@ -117,12 +160,30 @@ def main() -> None:
     parser.add_argument("--output-dir", default="grpo_adapter")
     parser.add_argument("--lora-rank", type=int, default=32)
     parser.add_argument("--num-generations", type=int, default=8, help="group size G")
+    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--grad-accum", type=int, default=4)
     parser.add_argument("--kl-beta", type=float, default=0.04)
     parser.add_argument("--learning-rate", type=float, default=1e-6)
-    parser.add_argument("--max-completion-length", type=int, default=4096)
+    parser.add_argument(
+        "--max-completion-length",
+        type=int,
+        default=8192,
+        help="token budget for the entire multi-turn episode, not per turn",
+    )
     parser.add_argument("--epochs", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=3407)
     parser.add_argument("--wandb-project", default="sql-agent-rlvr")
+    parser.add_argument(
+        "--use-vllm",
+        action="store_true",
+        help=(
+            "faster rollouts, but broken for our stack: TRL's vLLM weight sync "
+            "merges the LoRA and pushes raw tensors with no dequantization, which "
+            "shape-mismatches against a bitsandbytes-quantized vLLM engine "
+            "(huggingface/trl#3654, still open). Off by default; flip it once "
+            "that's fixed upstream."
+        ),
+    )
     args = parser.parse_args()
 
     examples: list[SpiderExample] = []
@@ -150,7 +211,12 @@ def main() -> None:
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
     model = AutoModelForCausalLM.from_pretrained(
-        MODEL_NAME, dtype=torch.bfloat16, device_map="auto"
+        MODEL_NAME,
+        dtype=torch.bfloat16,
+        # Not device_map="auto": that's an inference-time helper that plans
+        # around whatever GPU memory is free at load time and isn't
+        # supported for training. Single GPU here, so pin everything to it.
+        device_map={"": 0},
     )
     model = get_peft_model(model, LoraConfig(**hp["lora"]))
 
@@ -159,12 +225,17 @@ def main() -> None:
         reward_funcs=grpo_reward_func,
         train_dataset=dataset,
         args=GRPOConfig(**hp["grpo_config"]),
+        # Without this TRL falls back to AutoProcessor.from_pretrained() on
+        # a text-only model, which is a needless failure mode when the
+        # tokenizer is already loaded.
+        processing_class=tokenizer,
         environment_factory=SqlAgentGrpoEnv,
     )
     trainer.train()
 
-    model.save_pretrained(args.output_dir)
-    tokenizer.save_pretrained(args.output_dir)
+    # save_model() (not model.save_pretrained) so the adapter is pulled out
+    # of whatever accelerate wrapped the model in; also writes the tokenizer.
+    trainer.save_model(args.output_dir)
     print(f"\nAdapter saved to {args.output_dir}")
     print(f"Next: python -m eval.evaluate_grpo --lora-path {args.output_dir} --split validation")
 
