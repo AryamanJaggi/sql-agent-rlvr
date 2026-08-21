@@ -72,7 +72,7 @@ def test_step_budget_raises_after_max_steps(env):
         env.inspect_schema()
     assert env.done is False
 
-    with pytest.raises(ValueError, match="Step limit reached"):
+    with pytest.raises(ValueError, match="Max steps reached"):
         env.inspect_schema()
     assert env.done is True
 
