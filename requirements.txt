@@ -1,0 +1,11 @@
+# Local CPU-only dependencies (env/, data/, eval/, tests/).
+# These are the only deps this repo needs on a machine with no GPU.
+datasets>=2.19
+huggingface_hub>=0.23
+sqlparse>=0.5
+pytest>=8.0
+ollama>=0.3
+
+# not installed here:unsloth, trl, vllm, peft, bitsandbytes,
+# torch, wandb. These are Colab-only (train_grpo.py, train_sft.py) 
+# they will be added to the Colab notebook's install cell instead

@@ -1,0 +1,5 @@
+[tool.pytest.ini_options]
+pythonpath = ["."]
+markers = [
+    "integration: hits the network / real HF Hub, skips gracefully if offline",
+]
