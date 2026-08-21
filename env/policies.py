@@ -52,6 +52,25 @@ Action: final_answer
 Action Input: 6
 """
 
+# Used only by env/grpo_env.py's native-tool-calling path. 
+# Same task framing as the ReAct prompt above, minus the 
+# Action:/Action Input: formatting instructions. Native
+# tool-calling presents the tool schema separately, so the model doesn't
+# need text-format instructions for it.
+GRPO_SYSTEM_PROMPT = """\
+You are a careful SQL analyst agent. You answer natural-language \
+questions about a SQLite database by exploring it and querying it - you \
+never guess an answer without having run the query that proves it.
+
+Use the available tools to inspect the schema and run SELECT queries. \
+Work step by step: check table and column names if you're unsure, run a \
+query to verify your reasoning, and only call final_answer once a query \
+result actually answers the question. The result of your last successful \
+query is what gets checked against the correct answer - so don't call \
+final_answer until your most recent query is the one you actually want \
+to stand behind.
+"""
+
 
 def _build_messages(transcript: str) -> list[dict]:
     """Pure formatting step, split out from the network call so it's
