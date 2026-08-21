@@ -129,6 +129,7 @@ class UnslothPolicy:
     ):
         from unsloth import FastLanguageModel
         from vllm import SamplingParams
+        from vllm.lora.request import LoRARequest
 
         self.model, self.tokenizer = FastLanguageModel.from_pretrained(
             model_name=self.MODEL_NAME,
@@ -141,7 +142,15 @@ class UnslothPolicy:
         self._sampling_params = SamplingParams(
             temperature=temperature, top_p=top_p, max_tokens=max_tokens
         )
-        self._lora_request = self.model.load_lora(lora_path) if lora_path else None
+        # model.load_lora() isn't reliably available here - Unsloth only
+        # attaches it as a bound method via get_peft_model()'s patching,
+        # which a pure inference load (no fresh adapter being trained)
+        # never calls, hence a real AttributeError hit during eval.
+        # unsloth_zoo's own load_lora(load_tensors=False) branch does
+        # nothing but this: vLLM's own LoRARequest(name, id, path) reads
+        # the saved adapter directly off disk, no model-side LoRA
+        # structure required.
+        self._lora_request = LoRARequest("trained_adapter", 1, lora_path) if lora_path else None
 
     def __call__(self, transcript: str) -> str:
         prompt_text = self.tokenizer.apply_chat_template(
