@@ -55,10 +55,53 @@ def training_hyperparams(args: argparse.Namespace) -> dict:
             "optim": "paged_adamw_8bit",
             "seed": args.seed,
             "max_length": args.max_seq_length,
-            "assistant_only_loss": True,
             "report_to": "wandb",
             "run_name": f"sft-lora{args.lora_rank}-{args.epochs}ep",
         },
+    }
+
+
+def tokenize_and_mask(messages: list[dict], tokenizer, max_length: int) -> dict:
+    """Pre-tokenize one SFT record with the loss masked to only the
+    assistant turn's tokens.
+
+    Two real problems with letting Unsloth/TRL handle this
+    automatically, both hit during actual training runs: Unsloth's
+    patched SFTTrainer doesn't recognize a plain "messages" column and
+    crashes demanding a `formatting_func` (unsloth-zoo#323); and its
+    own train_on_responses_only() completion-masking helper is
+    documented as fragile for Qwen3's chat template
+    (unslothai/unsloth#2771), since it matches on hand-guessed marker
+    substrings that silently mask everything if they're a whitespace
+    off from what the template actually renders.
+
+    Instead, render the prompt prefix (system+user, with
+    add_generation_prompt=True so it includes the assistant turn's
+    opening tag) and the full conversation through the SAME
+    apply_chat_template call. add_generation_prompt just emits the
+    same tag that's already the first thing the assistant message's
+    own rendering produces, so prefix_ids is a literal token prefix of
+    full_ids for any well-formed chat template - masking up to that
+    length can't drift out of sync with whatever the template does.
+    A dataset that already has input_ids also sidesteps Unsloth's
+    formatting_func requirement entirely, since that's only enforced
+    when a dataset needs converting to text first.
+    """
+    prefix_ids = tokenizer.apply_chat_template(
+        messages[:-1], tokenize=True, add_generation_prompt=True
+    )
+    full_ids = tokenizer.apply_chat_template(
+        messages, tokenize=True, add_generation_prompt=False
+    )[:max_length]
+    prefix_len = min(len(prefix_ids), len(full_ids))
+
+    labels = list(full_ids)
+    labels[:prefix_len] = [-100] * prefix_len
+
+    return {
+        "input_ids": full_ids,
+        "attention_mask": [1] * len(full_ids),
+        "labels": labels,
     }
 
 
@@ -147,6 +190,10 @@ def main() -> None:
     model = FastLanguageModel.get_peft_model(model, **hp["lora"])
 
     dataset = Dataset.from_list(records)
+    dataset = dataset.map(
+        lambda ex: tokenize_and_mask(ex["messages"], tokenizer, args.max_seq_length),
+        remove_columns=["messages"],
+    )
 
     trainer = SFTTrainer(
         model=model,
