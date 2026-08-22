@@ -198,6 +198,7 @@ def main() -> None:
     from peft import LoraConfig, get_peft_model
     from transformers import AutoModelForCausalLM, AutoTokenizer, set_seed
     from trl import GRPOConfig, GRPOTrainer
+    from trl.chat_template_utils import qwen3_chat_template
 
     _wandb_login()
     import wandb
@@ -210,6 +211,19 @@ def main() -> None:
     set_seed(args.seed)
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    # TRL picks the response parser (what turns a raw generation back into
+    # structured tool calls) by matching the chat template with exact string
+    # equality against templates it bundles. The Unsloth repo ships its own
+    # chat_template.jinja, so it matches nothing and TRL raises
+    # "Unrecognized chat template, failed to add response schema".
+    #
+    # Adopt TRL's canonical Qwen3 template rather than just hand-setting the
+    # parser: the template that RENDERS tool calls and the parser that READS
+    # them back are a matched pair, and pinning only one of them risks the
+    # two formats drifting into silent mis-parsing. This also leaves TRL to
+    # pick new-style response_template vs legacy response_schema based on
+    # the installed transformers version, instead of us guessing.
+    tokenizer.chat_template = qwen3_chat_template
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_NAME,
         dtype=torch.bfloat16,

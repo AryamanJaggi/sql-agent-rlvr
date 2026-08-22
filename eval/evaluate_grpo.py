@@ -253,6 +253,16 @@ def main() -> None:
     # see the identical fix in env/policies.py's UnslothPolicy for why.
     lora_request = LoRARequest("trained_adapter", 1, args.lora_path) if args.lora_path else None
 
+    if args.lora_path:
+        from transformers import AutoTokenizer
+
+        # train_grpo.py swaps the base repo's chat template for TRL's
+        # canonical Qwen3 one (see the comment there) and saves it next to
+        # the adapter. Eval has to render tool calls exactly the way the
+        # policy was trained to see them, so take the tokenizer from the
+        # adapter directory rather than the base repo.
+        tokenizer = AutoTokenizer.from_pretrained(args.lora_path)
+
     tiers = [args.difficulty] if args.difficulty else list(DIFFICULTIES)
     
     for tier in tiers:
