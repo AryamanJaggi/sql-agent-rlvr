@@ -234,6 +234,16 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=30)
     parser.add_argument("--max-steps", type=int, default=10)
     parser.add_argument("--lora-path", default=None, help="omit to sanity-check the untrained base model")
+    parser.add_argument(
+        "--tokenizer-path",
+        default=None,
+        help=(
+            "load the chat template from here instead of the base repo. Defaults to "
+            "--lora-path when that's given. Needed to measure untrained-baseline "
+            "headroom under the same template GRPO trains with: point it at any "
+            "train_grpo.py output dir while leaving --lora-path off."
+        ),
+    )
     args = parser.parse_args()
 
     from unsloth import FastLanguageModel
@@ -253,15 +263,17 @@ def main() -> None:
     # see the identical fix in env/policies.py's UnslothPolicy for why.
     lora_request = LoRARequest("trained_adapter", 1, args.lora_path) if args.lora_path else None
 
-    if args.lora_path:
+    # train_grpo.py swaps the base repo's chat template for TRL's canonical
+    # Qwen3 one (see the comment there) and saves it next to the adapter.
+    # Eval has to render tool calls exactly the way the policy was trained
+    # to see them, so prefer that tokenizer over the base repo's. Split from
+    # --lora-path so an untrained-baseline headroom measurement can use the
+    # training template without loading any adapter weights.
+    tokenizer_path = args.tokenizer_path or args.lora_path
+    if tokenizer_path:
         from transformers import AutoTokenizer
 
-        # train_grpo.py swaps the base repo's chat template for TRL's
-        # canonical Qwen3 one (see the comment there) and saves it next to
-        # the adapter. Eval has to render tool calls exactly the way the
-        # policy was trained to see them, so take the tokenizer from the
-        # adapter directory rather than the base repo.
-        tokenizer = AutoTokenizer.from_pretrained(args.lora_path)
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
 
     tiers = [args.difficulty] if args.difficulty else list(DIFFICULTIES)
     
