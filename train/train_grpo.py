@@ -20,6 +20,7 @@ Run as a module so from data.../from env... resolve:
 from __future__ import annotations
 
 import argparse
+import os
 
 from data.spider_loader import Difficulty, SpiderExample, load_spider
 from env.grpo_env import MAX_STEPS, SqlAgentGrpoEnv, grpo_reward_func
@@ -130,6 +131,14 @@ def training_hyperparams(args: argparse.Namespace) -> dict:
             "vllm_mode": "colocate",
             "chat_template_kwargs": {"enable_thinking": False},
             "gradient_checkpointing": True,
+            # HF Trainer's save_steps default is 500, but a full run here is
+            # ~150 steps - so by default nothing is written until train()
+            # returns and a run that dies at 95% loses everything. These runs
+            # take many hours on a preemptible Colab VM, so checkpoint often
+            # enough that a crash costs one interval, not the whole run.
+            "save_strategy": "steps",
+            "save_steps": 25,
+            "save_total_limit": 3,
             "report_to": "wandb",
             "run_name": run_name,
             "log_completions": True,
@@ -197,6 +206,7 @@ def main() -> None:
     import torch
     from peft import LoraConfig, get_peft_model
     from transformers import AutoModelForCausalLM, AutoTokenizer, set_seed
+    from transformers.trainer_utils import get_last_checkpoint
     from trl import GRPOConfig, GRPOTrainer
     from trl.chat_template_utils import qwen3_chat_template
 
@@ -245,7 +255,20 @@ def main() -> None:
         processing_class=tokenizer,
         environment_factory=SqlAgentGrpoEnv,
     )
-    trainer.train()
+    # Resume automatically if this output dir already holds checkpoints, so a
+    # run killed partway through (Colab VM preemption, hitting the runtime
+    # cap) continues from the last save instead of starting over. Checkpoints
+    # carry optimizer, scheduler and RNG state as well as the adapter -
+    # save_only_model stays at its False default precisely so that resuming
+    # is possible. get_last_checkpoint returns None on a fresh output dir,
+    # which is exactly what train() wants for a first run.
+    last_checkpoint = None
+    if os.path.isdir(args.output_dir):
+        last_checkpoint = get_last_checkpoint(args.output_dir)
+    if last_checkpoint:
+        print(f"Resuming from checkpoint: {last_checkpoint}")
+
+    trainer.train(resume_from_checkpoint=last_checkpoint)
 
     # save_model() (not model.save_pretrained) so the adapter is pulled out
     # of whatever accelerate wrapped the model in; also writes the tokenizer.

@@ -138,6 +138,24 @@ def test_tool_call_iterations_bounded_by_env_step_budget():
     assert hp["grpo_config"]["max_tool_calling_iterations"] == MAX_STEPS
 
 
+def test_checkpoints_often_enough_to_survive_a_crash():
+    # A full run is ~150 steps, so HF Trainer's save_steps default of 500
+    # would write nothing until train() returns - a run dying at 95% would
+    # lose everything. These runs take many hours on a preemptible VM.
+    hp = training_hyperparams(_args())
+    assert hp["grpo_config"]["save_strategy"] == "steps"
+    assert hp["grpo_config"]["save_steps"] <= 25
+    assert hp["grpo_config"]["save_total_limit"] >= 1
+
+
+def test_checkpoints_keep_optimizer_state_so_a_run_can_resume():
+    # save_only_model=True would shrink checkpoints a lot but strip the
+    # optimizer, scheduler and RNG state, which makes resume impossible.
+    # main() auto-resumes from the last checkpoint, so this must stay off.
+    hp = training_hyperparams(_args())
+    assert hp["grpo_config"].get("save_only_model", False) is False
+
+
 def test_classic_grpo_loss_is_pinned():
     # TRL >=1.0 defaults loss_type to "dapo"; this project is comparing GRPO.
     hp = training_hyperparams(_args())
