@@ -133,12 +133,17 @@ def run_grpo_episode(
         transcript_lines.append(f"Assistant: {text}")
         steps_taken += 1
 
+        # Count every attempt, parseable or not, so invalid_tool_call_rate
+        # stays a genuine fraction. Counting only parsed calls put unparsed
+        # ones in the numerator but not the denominator, which inflated the
+        # rate and let it exceed 100%.
+        tool_call_count += 1
+
         parsed = parse_tool_call(text)
         if not parsed:
             observation = "Error: Failed to parse <tool_call> block."
             invalid_tool_call_count += 1
         else:
-            tool_call_count += 1
             method = getattr(env, parsed.name, None)
             
             if method is None or parsed.name.startswith("_") or parsed.name == "reset":

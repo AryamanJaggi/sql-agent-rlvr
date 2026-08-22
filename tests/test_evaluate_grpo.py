@@ -47,3 +47,29 @@ def test_finds_tool_call_amid_surrounding_text():
     text = 'Let me check the schema.\n<tool_call>\n{"name": "inspect_schema", "arguments": {}}\n</tool_call>\nDone.'
     result = parse_tool_call(text)
     assert result == ParsedToolCall(name="inspect_schema", arguments={})
+
+
+# ---- invalid_tool_call_rate is a real fraction ---------------------------
+
+
+def test_invalid_rate_counts_unparseable_output_in_the_denominator():
+    """A turn whose text has no parseable tool call is an *attempt* that
+    failed, so it belongs in both halves of the ratio. Counting it only in
+    the numerator inflated the rate and let it exceed 100% - which is how a
+    77.2% "invalid tool call rate" got reported on a tier where the model
+    was mostly just answering in prose instead of calling a tool.
+    """
+    from eval.evaluate_grpo import GrpoEpisodeResult
+
+    # 4 attempts, 3 of which never parsed.
+    r = GrpoEpisodeResult(
+        db_id="d",
+        success=False,
+        steps_taken=4,
+        tool_call_count=4,
+        invalid_tool_call_count=3,
+        transcript="",
+    )
+    rate = r.invalid_tool_call_count / r.tool_call_count
+    assert rate == 0.75
+    assert rate <= 1.0
