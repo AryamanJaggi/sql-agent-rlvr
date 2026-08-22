@@ -125,8 +125,19 @@ def training_hyperparams(args: argparse.Namespace) -> dict:
             "loss_type": "grpo",
             # Deliberately hotter than eval/evaluate_grpo.py's 0.7: RL needs
             # exploration to get reward variance within a group, eval wants
-            # the policy's confident behaviour.
-            "temperature": 1.0,
+            # the policy's confident behaviour. Real run 1 (2026-08-22)
+            # showed entropy collapsing to ~0.06 by the end of training
+            # (frac_reward_zero_std climbing 0.5->0.8) - --temperature lets
+            # this be pushed even hotter without a code change.
+            "temperature": args.temperature,
+            # TRL's own adaptive entropy control (introduced for the same
+            # collapse-during-RL failure mode reported in Skywork-OR1).
+            # Starts entropy_coef at 0.0 and nudges it up toward
+            # entropy_target=0.2 whenever measured entropy falls below that -
+            # our run 1 entropy of ~0.06 was well under it. This is a fix
+            # at the loss level, complementary to --temperature (which only
+            # affects the sampling distribution during rollouts).
+            "use_adaptive_entropy": True,
             "use_vllm": args.use_vllm,
             "vllm_mode": "colocate",
             "chat_template_kwargs": {"enable_thinking": False},
@@ -173,6 +184,12 @@ def main() -> None:
     parser.add_argument("--grad-accum", type=int, default=4)
     parser.add_argument("--kl-beta", type=float, default=0.04)
     parser.add_argument("--learning-rate", type=float, default=1e-6)
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=1.0,
+        help="rollout sampling temperature - raise to fight entropy collapse",
+    )
     parser.add_argument(
         "--max-completion-length",
         type=int,

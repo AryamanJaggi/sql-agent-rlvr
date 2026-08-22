@@ -17,6 +17,7 @@ def _args(**overrides) -> argparse.Namespace:
         grad_accum=4,
         kl_beta=0.04,
         learning_rate=1e-6,
+        temperature=1.0,
         max_completion_length=8192,
         epochs=1.0,
         seed=3407,
@@ -136,6 +137,20 @@ def test_tool_call_iterations_bounded_by_env_step_budget():
     # itself - this is what actually bounds the turn count.
     hp = training_hyperparams(_args())
     assert hp["grpo_config"]["max_tool_calling_iterations"] == MAX_STEPS
+
+
+def test_temperature_comes_from_cli():
+    hp = training_hyperparams(_args(temperature=1.15))
+    assert hp["grpo_config"]["temperature"] == 1.15
+
+
+def test_adaptive_entropy_control_enabled():
+    # Real run 1 (2026-08-22) showed entropy collapsing to ~0.06, well under
+    # TRL's own entropy_target default of 0.2, with frac_reward_zero_std
+    # climbing 0.5->0.8 over training. This is TRL's purpose-built fix for
+    # that failure mode, not something we're hand-rolling.
+    hp = training_hyperparams(_args())
+    assert hp["grpo_config"]["use_adaptive_entropy"] is True
 
 
 def test_checkpoints_often_enough_to_survive_a_crash():
